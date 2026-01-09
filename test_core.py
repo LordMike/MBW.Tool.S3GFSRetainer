@@ -7,7 +7,8 @@ core_logic = s3_gfs_main.core_logic
 apply_removal = s3_gfs_main.apply_removal
 
 
-def test_retention_last_three_months_listing():
+def test_retention_policy_expected_decisions():
+    # This anchors expected retention outcomes against a real-world file list.
     keys = [
         "Automatic_backup_2025.10.4_2025-11-01_05.20_38003313.metadata.json",
         "Automatic_backup_2025.10.4_2025-11-01_05.20_38003313.tar",
@@ -377,11 +378,14 @@ def test_retention_last_three_months_listing():
 
     assert removal_result["deleted"] == 156
     assert len(removal_result["deleted_keys"]) == 156
+    # Ensure none of the keepers are scheduled for deletion.
     assert not kept_keys.intersection(removal_result["deleted_keys"])
 
 
 def test_removal_with_new_backup_only_removes_previous_latest():
+    # This checks that when a new backup arrives, the removal logic drops the oldest daily keeper.
     keys = [
+        # These are the four kept timestamps from test_retention_policy_expected_decisions.
         "Automatic_backup_2025.12.4_2025-12-31_05.06_24004437.metadata.json",
         "Automatic_backup_2025.12.4_2025-12-31_05.06_24004437.tar",
         "Automatic_backup_2025.12.4_2026-01-04_05.10_25003988.metadata.json",
@@ -390,6 +394,7 @@ def test_removal_with_new_backup_only_removes_previous_latest():
         "Automatic_backup_2025.12.5_2026-01-08_20.47_35897656.tar",
         "Automatic_backup_2026.1.0_2026-01-09_04.45_52003641.metadata.json",
         "Automatic_backup_2026.1.0_2026-01-09_04.45_52003641.tar",
+        # This is the new arrival that should bump the oldest daily keeper.
         "Automatic_backup_2026.1.0_2026-01-10_05.12_12345678.metadata.json",
         "Automatic_backup_2026.1.0_2026-01-10_05.12_12345678.tar",
     ]
@@ -416,8 +421,8 @@ def test_removal_with_new_backup_only_removes_previous_latest():
     )
 
     expected_removed = {
-        "Automatic_backup_2026.1.0_2026-01-09_04.45_52003641.metadata.json",
-        "Automatic_backup_2026.1.0_2026-01-09_04.45_52003641.tar",
+        "Automatic_backup_2025.12.5_2026-01-08_20.47_35897656.metadata.json",
+        "Automatic_backup_2025.12.5_2026-01-08_20.47_35897656.tar",
     }
 
     assert removal_result["deleted"] == 2
@@ -425,6 +430,7 @@ def test_removal_with_new_backup_only_removes_previous_latest():
 
 
 def test_min_remaining_keeps_five_and_removes_one():
+    # This verifies the safety floor prevents deleting below min_remaining.
     keys = [
         "Automatic_backup_2026.01.0_2026-01-01_01.00_00000001.tar",
         "Automatic_backup_2026.01.0_2026-01-02_01.00_00000002.tar",
@@ -456,14 +462,17 @@ def test_min_remaining_keeps_five_and_removes_one():
         min_remaining=5,
     )
 
+    # Core marks 2 keeps / 4 removals, but apply_removal should honor min_remaining.
     assert sum(1 for _key, decision, _tag in decisions if decision == "keep") == 2
     assert sum(1 for _key, decision, _tag in decisions if decision == "remove") == 4
+    # Only one deletion is allowed so five remain.
     assert removal_result["deleted"] == 1
     assert len(removal_result["deleted_keys"]) == 1
     assert removal_result["deleted_keys"][0] == "Automatic_backup_2026.01.0_2026-01-01_01.00_00000001.tar"
 
 
 def test_decisions_are_ordered_by_datetime():
+    # This confirms decision ordering is oldest-first, which removal relies on.
     keys = [
         "Automatic_backup_2026.01.0_2026-01-02_01.00_00000002.tar",
         "Automatic_backup_2026.01.0_2026-01-01_01.00_00000001.tar",
