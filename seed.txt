@@ -1,0 +1,164 @@
+Below is a **concise, self-contained brief** you can paste directly into **Codex**.
+It intentionally **omits all code** and focuses on *requirements, architecture, invariants, and intent*, so Codex has the correct mental model when you give it the code.
+
+---
+
+## Problem statement
+
+We need an **in-place GFS-style retention system for AWS S3** backups (Home Assistant backups), implemented as a **Python Lambda**.
+
+S3 lifecycle policies are insufficient because they are **age-based only**. We require **frequency-based retention**:
+
+* keep recent daily backups,
+* keep a few weekly backups,
+* keep longer-term monthly backups,
+  **without copying objects** (no new storage objects).
+
+Retention must be deterministic, conservative, and debuggable.
+
+---
+
+## High-level design
+
+The system consists of **three logical parts**:
+
+### 1. Fetcher
+
+* Lists objects from an S3 bucket (optionally under a prefix).
+* Only the **object key (name)** is required; metadata is not relied on.
+* No sorting is done here.
+
+### 2. Core retention logic (pure function)
+
+* Input:
+
+  * A list of **object keys (strings)**.
+  * A **retention policy**:
+
+    * keep_hourly (optional, often 0)
+    * keep_daily (e.g. 7)
+    * keep_weekly (e.g. 4)
+    * keep_monthly (e.g. 12)
+* Filenames contain a **full UTC timestamp**, parsed via **one known regex** (to be finalized before going live).
+* Timestamps are parsed from filenames only.
+* Unparseable filenames are treated conservatively (always **kept**).
+
+#### Core logic behavior
+
+* Objects are grouped into time buckets:
+
+  * hourly → (year, month, day, hour)
+  * daily → (year, month, day)
+  * weekly → ISO year + ISO week
+  * monthly → (year, month)
+* For each bucket type:
+
+  * Keep the **newest object per bucket**, up to the configured count.
+* Priority order:
+
+  1. hourly
+  2. daily
+  3. weekly
+  4. monthly
+* An object may only receive **one tag**, based on the highest-priority rule that selected it.
+
+#### Core logic output
+
+The core returns a list of tuples **in deterministic order**:
+
+```
+(key, decision, tag)
+```
+
+Where:
+
+* decision ∈ `keep | remove`
+* tag ∈ `hourly | daily | weekly | monthly | unparsed | none`
+* Order is controlled by the core (typically oldest-first or newest-first as explicitly defined).
+
+This output is used for:
+
+* debugging
+* testing
+* deletion planning
+
+---
+
+### 3. Applier (deleter)
+
+* Receives the ordered list of `(key, decision, tag)` tuples from the core.
+* **Does not sort** — it trusts the core’s ordering.
+* Maintains a running count of remaining objects.
+* Iterates in order:
+
+  * For each `"remove"`:
+
+    * decrement remaining count
+    * if remaining count is **<= 5**, abort deletion immediately
+* This guarantees:
+
+  * At least **5 objects always remain**
+  * Deletions occur **oldest-first**
+* Deletions are batched via `DeleteObjects`.
+
+Dry-run mode must be supported.
+
+---
+
+## Entrypoint behavior
+
+* The program has a simple entrypoint (`main` / Lambda handler).
+* No CLI argument parsing.
+* Configuration via environment variables:
+
+  * bucket
+  * prefix
+  * retention policy values
+  * dry-run flag
+* Execution flow:
+
+  1. Fetch keys from S3
+  2. Build retention policy
+  3. Run core logic
+  4. Apply deletions
+  5. Log decisions and result
+
+---
+
+## Safety and invariants
+
+* Never delete everything.
+* Never delete if total objects ≤ 5.
+* Unparseable filenames are **never deleted**.
+* No object copying or rewriting.
+* Deletion decisions are explicit and auditable.
+* Core logic is fully unit-testable and side-effect-free.
+
+---
+
+## Testing expectations
+
+* Core logic is tested in isolation.
+* Tests provide:
+
+  * a list of filenames
+  * a retention policy
+* Tests assert the **exact list of `(key, decision, tag)` tuples** returned.
+* No S3 or AWS interaction in tests.
+
+---
+
+## Operational intent
+
+* Designed for Home Assistant backups in S3 (~hundreds of GB).
+* Intended to run on a **schedule (EventBridge)**.
+* Prefer correctness, determinism, and debuggability over cleverness.
+* Easy to adjust filename regex once real backup names are confirmed.
+
+---
+
+This system intentionally replaces S3 lifecycle policies for **frequency-based retention**, while remaining minimal, auditable, and safe.
+
+---
+
+If you want, I can also produce a **second Codex prompt** that specifically asks it to refactor or extend (e.g. add metrics, structured logging, or S3 Inventory support).
