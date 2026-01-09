@@ -391,3 +391,115 @@ def test_retention_last_three_months_listing():
     assert removal_result["deleted"] == 156
     assert len(removal_result["deleted_keys"]) == 156
     assert not kept_keys.intersection(removal_result["deleted_keys"])
+
+
+def test_removal_with_new_backup_only_removes_previous_latest():
+    keys = [
+        "Automatic_backup_2025.12.4_2025-12-31_05.06_24004437.metadata.json",
+        "Automatic_backup_2025.12.4_2025-12-31_05.06_24004437.tar",
+        "Automatic_backup_2025.12.4_2026-01-04_05.10_25003988.metadata.json",
+        "Automatic_backup_2025.12.4_2026-01-04_05.10_25003988.tar",
+        "Automatic_backup_2025.12.5_2026-01-08_20.47_35897656.metadata.json",
+        "Automatic_backup_2025.12.5_2026-01-08_20.47_35897656.tar",
+        "Automatic_backup_2026.1.0_2026-01-09_04.45_52003641.metadata.json",
+        "Automatic_backup_2026.1.0_2026-01-09_04.45_52003641.tar",
+        "Automatic_backup_2026.1.0_2026-01-10_05.12_12345678.metadata.json",
+        "Automatic_backup_2026.1.0_2026-01-10_05.12_12345678.tar",
+    ]
+
+    policy = RetentionPolicy(
+        keep_daily=2,
+        keep_weekly=2,
+        keep_monthly=2,
+    )
+
+    decisions = core_logic(
+        keys,
+        policy,
+        filename_ts_re=s3_gfs_main.re.compile(
+            r"Automatic_backup_\d+\.\d+\.\d+_(\d{4}-\d{2}-\d{2}_\d{2}\.\d{2})_"
+        ),
+        timestamp_format="%Y-%m-%d_%H.%M",
+    )
+
+    removal_result = apply_removal(
+        bucket="test-bucket",
+        decisions=decisions,
+        dry_run=True,
+    )
+
+    expected_removed = {
+        "Automatic_backup_2026.1.0_2026-01-09_04.45_52003641.metadata.json",
+        "Automatic_backup_2026.1.0_2026-01-09_04.45_52003641.tar",
+    }
+
+    assert removal_result["deleted"] == 2
+    assert set(removal_result["deleted_keys"]) == expected_removed
+
+
+def test_min_remaining_keeps_five_and_removes_one():
+    keys = [
+        "Automatic_backup_2026.01.0_2026-01-01_01.00_00000001.tar",
+        "Automatic_backup_2026.01.0_2026-01-02_01.00_00000002.tar",
+        "Automatic_backup_2026.01.0_2026-01-03_01.00_00000003.tar",
+        "Automatic_backup_2026.01.0_2026-01-04_01.00_00000004.tar",
+        "Automatic_backup_2026.01.0_2026-01-05_01.00_00000005.tar",
+        "Automatic_backup_2026.01.0_2026-01-06_01.00_00000006.tar",
+    ]
+
+    policy = RetentionPolicy(
+        keep_daily=2,
+        keep_weekly=0,
+        keep_monthly=0,
+    )
+
+    decisions = core_logic(
+        keys,
+        policy,
+        filename_ts_re=s3_gfs_main.re.compile(
+            r"Automatic_backup_\d+\.\d+\.\d+_(\d{4}-\d{2}-\d{2}_\d{2}\.\d{2})_"
+        ),
+        timestamp_format="%Y-%m-%d_%H.%M",
+    )
+
+    removal_result = apply_removal(
+        bucket="test-bucket",
+        decisions=decisions,
+        dry_run=True,
+        min_remaining=5,
+    )
+
+    assert sum(1 for _key, decision, _tag in decisions if decision == "keep") == 2
+    assert sum(1 for _key, decision, _tag in decisions if decision == "remove") == 4
+    assert removal_result["deleted"] == 1
+    assert len(removal_result["deleted_keys"]) == 1
+    assert removal_result["deleted_keys"][0] == "Automatic_backup_2026.01.0_2026-01-01_01.00_00000001.tar"
+
+
+def test_decisions_are_ordered_by_datetime():
+    keys = [
+        "Automatic_backup_2026.01.0_2026-01-02_01.00_00000002.tar",
+        "Automatic_backup_2026.01.0_2026-01-01_01.00_00000001.tar",
+        "Automatic_backup_2026.01.0_2026-01-03_01.00_00000003.tar",
+    ]
+
+    policy = RetentionPolicy(
+        keep_daily=0,
+        keep_weekly=0,
+        keep_monthly=0,
+    )
+
+    decisions = core_logic(
+        keys,
+        policy,
+        filename_ts_re=s3_gfs_main.re.compile(
+            r"Automatic_backup_\d+\.\d+\.\d+_(\d{4}-\d{2}-\d{2}_\d{2}\.\d{2})_"
+        ),
+        timestamp_format="%Y-%m-%d_%H.%M",
+    )
+
+    assert [key for key, _decision, _tag in decisions] == [
+        "Automatic_backup_2026.01.0_2026-01-01_01.00_00000001.tar",
+        "Automatic_backup_2026.01.0_2026-01-02_01.00_00000002.tar",
+        "Automatic_backup_2026.01.0_2026-01-03_01.00_00000003.tar",
+    ]
