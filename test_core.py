@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from s3_gfs_retention.core import RetentionPolicy, decide_gfs
+from main import RetentionPolicy, core_logic
 
 
 def test_decide_gfs_exact_output_daily_only():
@@ -23,7 +23,7 @@ def test_decide_gfs_exact_output_daily_only():
         keep_monthly=0,
     )
 
-    actual = decide_gfs(keys, policy)
+    actual = core_logic(keys, policy)
 
     expected = [
         ("ha/backup-2026-01-08T010000Z.tar", "keep", "daily"),
