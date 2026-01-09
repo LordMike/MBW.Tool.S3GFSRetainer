@@ -79,33 +79,34 @@ def core_logic(
     Conservative behavior:
       - unparsed timestamps => keep (tag=unparsed)
     """
-    parsed: List[Tuple[str, Optional[datetime]]] = [
-        (k, parse_timestamp_from_key(k, filename_ts_re, timestamp_format)) for k in keys
+    parsed: List[Tuple[int, str, Optional[datetime]]] = [
+        (idx, k, parse_timestamp_from_key(k, filename_ts_re, timestamp_format))
+        for idx, k in enumerate(keys)
     ]
 
     # Keep unparsed objects for safety
-    unparsed_keys = {k for k, dt in parsed if dt is None}
+    unparsed_keys = {k for _idx, k, dt in parsed if dt is None}
 
-    parsed_items: List[Tuple[str, datetime]] = [(k, dt) for k, dt in parsed if dt is not None]
+    parsed_items: List[Tuple[int, str, datetime]] = [
+        (idx, k, dt) for idx, k, dt in parsed if dt is not None
+    ]
     if not parsed_items:
-        return [(k, "keep", "unparsed") for k, _ in parsed]
+        return [(k, "keep", "unparsed") for _idx, k, _dt in parsed]
 
-    # Newest -> oldest
-    parsed_items.sort(key=lambda x: x[1], reverse=True)
-
-    keepers: Dict[str, str] = {}  # key -> tag
+    # Newest -> oldest for selection
+    parsed_items_newest = sorted(parsed_items, key=lambda x: x[2], reverse=True)
+    keepers: Dict[str, set] = {}  # key -> tags
 
     def select(bucket_fn, keep_n: int, tag: str) -> None:
         if keep_n <= 0:
             return
         seen = set()
-        for k, dt in parsed_items:
+        for _idx, k, dt in parsed_items_newest:
             b = bucket_fn(dt)
             if b in seen:
                 continue
             seen.add(b)
-            if k not in keepers:
-                keepers[k] = tag
+            keepers.setdefault(k, set()).add(tag)
             if len(seen) >= keep_n:
                 break
 
@@ -126,9 +127,13 @@ def core_logic(
 
     # Output list: newest->oldest for parsed items, then unparsed (sorted)
     out: List[DecisionTuple] = []
-    for k, _dt in parsed_items:
+    parsed_items_oldest = sorted(parsed_items, key=lambda x: x[2])
+    tag_order = ("monthly", "weekly", "daily")
+    for _idx, k, _dt in parsed_items_oldest:
         if k in keepers:
-            out.append((k, "keep", keepers[k]))
+            tags = keepers[k]
+            tag = ",".join(t for t in tag_order if t in tags)
+            out.append((k, "keep", tag))
         else:
             out.append((k, "remove", ""))
 
