@@ -95,6 +95,9 @@ def core_logic(
 
     # Newest -> oldest for selection
     parsed_items_newest = sorted(parsed_items, key=lambda x: x[2], reverse=True)
+    dt_to_keys: Dict[datetime, List[str]] = {}
+    for _idx, k, dt in parsed_items:
+        dt_to_keys.setdefault(dt, []).append(k)
     keepers: Dict[str, set] = {}  # key -> tags
 
     def select(bucket_fn, keep_n: int, tag: str) -> None:
@@ -106,7 +109,8 @@ def core_logic(
             if b in seen:
                 continue
             seen.add(b)
-            keepers.setdefault(k, set()).add(tag)
+            for key in dt_to_keys.get(dt, []):
+                keepers.setdefault(key, set()).add(tag)
             if len(seen) >= keep_n:
                 break
 
@@ -183,7 +187,7 @@ def apply_removal(
 
         # If we delete this one, remaining decreases by 1.
         next_remaining = remaining - 1
-        if next_remaining <= min_remaining:
+        if next_remaining < min_remaining:
             break
 
         keys_to_delete.append(key)
