@@ -13,39 +13,26 @@ DecisionTuple = Tuple[str, str, str]  # (key, decision, tag)
 
 @dataclass(frozen=True)
 class RetentionPolicy:
-    keep_hourly: int = 0
     keep_daily: int = 7
     keep_weekly: int = 4
     keep_monthly: int = 12
 
 
-# Single regex for timestamps in filenames.
-# Can be overridden with env var S3_GFS_REGEX.
-# The regex should capture the timestamp in its first capture group.
-#
-# Timestamp parsing uses the format from S3_GFS_TIMESTAMP_FORMAT.
-#
-# Current expectation: ...YYYY-MM-DDTHHMMSSZ... or ...YYYY-MM-DDTHH:MM:SSZ...
-#
-# Groups required: y m d H M S
-_regex_value = os.environ.get("S3_GFS_REGEX")
-if not _regex_value:
-    raise RuntimeError("S3_GFS_REGEX is required and must include a capture group.")
-FILENAME_TS_RE = re.compile(_regex_value)
-TIMESTAMP_FORMAT = os.environ.get("S3_GFS_TIMESTAMP_FORMAT", "%Y-%m-%dT%H:%M:%SZ")
-
-
-def parse_timestamp_from_key(key: str) -> Optional[datetime]:
+def parse_timestamp_from_key(
+    key: str,
+    filename_ts_re: re.Pattern[str],
+    timestamp_format: str,
+) -> Optional[datetime]:
     """
-    Parse a UTC timestamp from the object key using FILENAME_TS_RE.
+    Parse a UTC timestamp from the object key using the provided regex.
     Returns timezone-aware UTC datetime if match; otherwise None.
     """
-    m = FILENAME_TS_RE.search(key)
+    m = filename_ts_re.search(key)
     if not m:
         return None
     try:
         ts = m.group(1)
-        dt = datetime.strptime(ts, TIMESTAMP_FORMAT)
+        dt = datetime.strptime(ts, timestamp_format)
         return dt.replace(tzinfo=timezone.utc)
     except (ValueError, IndexError):
         return None
@@ -75,7 +62,13 @@ def fetch_from_s3(bucket: str, prefix: str = "", region: Optional[str] = None) -
     return out
 
 
-def core_logic(keys: Iterable[str], policy: RetentionPolicy) -> List[DecisionTuple]:
+def core_logic(
+    keys: Iterable[str],
+    policy: RetentionPolicy,
+    *,
+    filename_ts_re: re.Pattern[str],
+    timestamp_format: str,
+) -> List[DecisionTuple]:
     """
     Receives object keys, parses timestamps from names, and returns decisions:
       (key, "keep"/"remove", tag)
@@ -86,7 +79,9 @@ def core_logic(keys: Iterable[str], policy: RetentionPolicy) -> List[DecisionTup
     Conservative behavior:
       - unparsed timestamps => keep (tag=unparsed)
     """
-    parsed: List[Tuple[str, Optional[datetime]]] = [(k, parse_timestamp_from_key(k)) for k in keys]
+    parsed: List[Tuple[str, Optional[datetime]]] = [
+        (k, parse_timestamp_from_key(k, filename_ts_re, timestamp_format)) for k in keys
+    ]
 
     # Keep unparsed objects for safety
     unparsed_keys = {k for k, dt in parsed if dt is None}
@@ -114,9 +109,6 @@ def core_logic(keys: Iterable[str], policy: RetentionPolicy) -> List[DecisionTup
             if len(seen) >= keep_n:
                 break
 
-    def hour_bucket(dt: datetime) -> Tuple[int, int, int, int]:
-        return (dt.year, dt.month, dt.day, dt.hour)
-
     def day_bucket(dt: datetime) -> Tuple[int, int, int]:
         return (dt.year, dt.month, dt.day)
 
@@ -128,7 +120,6 @@ def core_logic(keys: Iterable[str], policy: RetentionPolicy) -> List[DecisionTup
         return (dt.year, dt.month)
 
     # Priority: most specific first
-    select(hour_bucket, policy.keep_hourly, "hourly")
     select(day_bucket, policy.keep_daily, "daily")
     select(iso_week_bucket, policy.keep_weekly, "weekly")
     select(month_bucket, policy.keep_monthly, "monthly")
@@ -139,7 +130,7 @@ def core_logic(keys: Iterable[str], policy: RetentionPolicy) -> List[DecisionTup
         if k in keepers:
             out.append((k, "keep", keepers[k]))
         else:
-            out.append((k, "remove", "none"))
+            out.append((k, "remove", ""))
 
     for k in sorted(unparsed_keys):
         out.append((k, "keep", "unparsed"))
@@ -235,10 +226,17 @@ def main() -> dict:
     bucket = os.environ["S3_BUCKET"]
     prefix = os.environ.get("S3_PREFIX", "")
     region = os.environ.get("AWS_REGION")
+    regex_value = os.environ.get("S3_GFS_REGEX")
+    if not regex_value:
+        raise RuntimeError("S3_GFS_REGEX is required and must include a capture group.")
+    try:
+        filename_ts_re = re.compile(regex_value)
+    except re.error as exc:
+        raise RuntimeError("S3_GFS_REGEX is invalid.") from exc
+    timestamp_format = os.environ.get("S3_GFS_TIMESTAMP_FORMAT", "%Y-%m-%dT%H:%M:%SZ")
 
     # Defaults are the policy you described; tweak via env if desired.
     policy = RetentionPolicy(
-        keep_hourly=int(os.environ.get("S3_GFS_KEEP_HOURLY", "0")),
         keep_daily=int(os.environ.get("S3_GFS_KEEP_DAILY", "7")),
         keep_weekly=int(os.environ.get("S3_GFS_KEEP_WEEKLY", "4")),
         keep_monthly=int(os.environ.get("S3_GFS_KEEP_MONTHLY", "12")),
@@ -248,7 +246,12 @@ def main() -> dict:
     min_remaining = int(os.environ.get("S3_GFS_MIN_REMAINING", "5"))
 
     keys = fetch_from_s3(bucket=bucket, prefix=prefix, region=region)
-    decisions = core_logic(keys, policy)
+    decisions = core_logic(
+        keys,
+        policy,
+        filename_ts_re=filename_ts_re,
+        timestamp_format=timestamp_format,
+    )
 
     # Apply deletions
     result = apply_removal(

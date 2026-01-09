@@ -12,7 +12,6 @@ These environment variables control the Lambda behavior.
 - `AWS_SESSION_TOKEN` (optional): AWS session token for boto3 credentials.
 - `S3_GFS_REGEX` (required): Regex used to capture the timestamp substring in the first capture group.
 - `S3_GFS_TIMESTAMP_FORMAT` (optional): `strptime` format for the captured timestamp (default: `%Y-%m-%dT%H:%M:%SZ`).
-- `S3_GFS_KEEP_HOURLY` (optional): Hourly buckets to keep (default: `0`).
 - `S3_GFS_KEEP_DAILY` (optional): Daily buckets to keep (default: `7`).
 - `S3_GFS_KEEP_WEEKLY` (optional): Weekly buckets to keep (default: `4`).
 - `S3_GFS_KEEP_MONTHLY` (optional): Monthly buckets to keep (default: `12`).
