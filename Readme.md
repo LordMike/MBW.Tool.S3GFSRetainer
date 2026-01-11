@@ -82,16 +82,31 @@ dict to stdout and returns it (useful in Lambda).
 This script can run anywhere you can set environment variables and reach S3,
 but it is designed to run inside AWS Lambda based on an event trigger.
 
-For Lambda:
+For Lambda (practical setup with S3 -> SQS -> Lambda):
 
-- Set the handler to `main.handler`.
-- Trigger it with any event source you prefer (for example, an EventBridge
-  schedule).
-- Ensure the Lambda role has `s3:ListBucket` and `s3:DeleteObject` on the target
-  bucket/prefix.
+- Have your S3 Bucket with backups in it
+  - This will send notifications whenever a new backup is made
+- Create an SQS queue to receive the notifications
+  - In the bucket, setup an `Event notifications` to the SQS queue
+  - Ensure that policies are in place to allow S3 to send notifications to SQS
+- Create a Lambda function
+  - Use the `main.py` script in this repo
+  - Set the handler to `main.handler`
+  - Add an `SQS Trigger` for the SQS queue from before
+  - Set the environment variables as desired
+  - Set the runtime to `python3.11`
+- Create an IAM role for Lambda with permissions:
+  - `s3:ListBucket` on the bucket ARN.
+  - `s3:DeleteObject` on the bucket objects ARN (`arn:aws:s3:::MYBUCKET/*`).
+  - SQS consume permissions on the queue (`sqs:ReceiveMessage`,
+    `sqs:DeleteMessage`, `sqs:GetQueueAttributes`, `sqs:GetQueueUrl`,
+    `sqs:ChangeMessageVisibility`).
+  - CloudWatch Logs write permissions (`logs:CreateLogGroup`,
+    `logs:CreateLogStream`, `logs:PutLogEvents`).
+
+Logs appear in CloudWatch Logs under `/aws/lambda/<function-name>`. The script is
+idempotent, so you can run it as often as you want without side effects.
 
 ## Tests
 
-```
-pytest
-```
+Tests have been made to test the logic inside the script. They can be run with `pytest`.
