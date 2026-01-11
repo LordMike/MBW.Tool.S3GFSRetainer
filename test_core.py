@@ -528,3 +528,32 @@ def test_unparsed_paths_are_ignored():
     decision_map = {key: decision for key, decision, _tag in decisions}
 
     assert decision_map["unexpected.txt"] == "ignore"
+
+
+def test_keep_daily_keeps_latest_per_day_with_multiple_same_day():
+    keys = [
+        "Automatic_backup_2026.02.0_2026-02-01_01.00_00000001.tar",
+        "Automatic_backup_2026.02.0_2026-02-02_01.00_00000002.tar",
+        "Automatic_backup_2026.02.0_2026-02-03_01.00_00000003.tar",
+        "Automatic_backup_2026.02.0_2026-02-03_22.00_00000004.tar",
+    ]
+
+    policy = RetentionPolicy(
+        keep_daily=3,
+        keep_weekly=0,
+        keep_monthly=0,
+    )
+
+    decisions = core_logic(
+        keys,
+        policy,
+        filename_ts_re=FILENAME_TS_RE,
+        timestamp_format=TIMESTAMP_FORMAT,
+    )
+
+    kept = {key for key, decision, _tag in decisions if decision == "keep"}
+    assert kept == {
+        "Automatic_backup_2026.02.0_2026-02-01_01.00_00000001.tar",
+        "Automatic_backup_2026.02.0_2026-02-02_01.00_00000002.tar",
+        "Automatic_backup_2026.02.0_2026-02-03_22.00_00000004.tar",
+    }
