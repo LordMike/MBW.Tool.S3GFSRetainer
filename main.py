@@ -8,7 +8,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import boto3
 
-DecisionTuple = Tuple[str, str, str]  # (key, decision, tag)
+DecisionTuple = Tuple[str, str, str]  # (key, decision, tag) decision=keep/remove/ignore
 
 
 @dataclass(frozen=True)
@@ -74,43 +74,44 @@ def core_logic(
       (key, "keep"/"remove", tag)
 
     Tags:
-      hourly/daily/weekly/monthly/unparsed/none
+      daily/weekly/monthly/unparsed/none
 
     Conservative behavior:
-      - unparsed timestamps => keep (tag=unparsed)
+      - unparsed timestamps => ignore (tag=unparsed)
     """
-    parsed: List[Tuple[int, str, Optional[datetime]]] = [
-        (idx, k, parse_timestamp_from_key(k, filename_ts_re, timestamp_format))
-        for idx, k in enumerate(keys)
-    ]
+    parsed_items: List[Tuple[int, str, datetime]] = []
+    unparsed_items: List[Tuple[int, str]] = []
+    for idx, k in enumerate(keys):
+        dt = parse_timestamp_from_key(k, filename_ts_re, timestamp_format)
+        if dt is None:
+            unparsed_items.append((idx, k))
+        else:
+            parsed_items.append((idx, k, dt))
 
-    # Keep unparsed objects for safety
-    unparsed_keys = {k for _idx, k, dt in parsed if dt is None}
-
-    parsed_items: List[Tuple[int, str, datetime]] = [
-        (idx, k, dt) for idx, k, dt in parsed if dt is not None
-    ]
     if not parsed_items:
-        return [(k, "keep", "unparsed") for _idx, k, _dt in parsed]
+        return [
+            (k, "ignore", "unparsed")
+            for _idx, k in sorted(unparsed_items, key=lambda x: x[0])
+        ]
+
+    groups: Dict[datetime, List[Tuple[int, str]]] = {}
+    for idx, k, dt in parsed_items:
+        groups.setdefault(dt, []).append((idx, k))
 
     # Newest -> oldest for selection
-    parsed_items_newest = sorted(parsed_items, key=lambda x: x[2], reverse=True)
-    dt_to_keys: Dict[datetime, List[str]] = {}
-    for _idx, k, dt in parsed_items:
-        dt_to_keys.setdefault(dt, []).append(k)
-    keepers: Dict[str, set] = {}  # key -> tags
+    group_dts_newest = sorted(groups.keys(), reverse=True)
+    keepers: Dict[datetime, set] = {}  # timestamp -> tags
 
     def select(bucket_fn, keep_n: int, tag: str) -> None:
         if keep_n <= 0:
             return
         seen = set()
-        for _idx, k, dt in parsed_items_newest:
-            b = bucket_fn(dt)
-            if b in seen:
+        for dt in group_dts_newest:
+            bucket = bucket_fn(dt)
+            if bucket in seen:
                 continue
-            seen.add(b)
-            for key in dt_to_keys.get(dt, []):
-                keepers.setdefault(key, set()).add(tag)
+            seen.add(bucket)
+            keepers.setdefault(dt, set()).add(tag)
             if len(seen) >= keep_n:
                 break
 
@@ -129,20 +130,24 @@ def core_logic(
     select(iso_week_bucket, policy.keep_weekly, "weekly")
     select(month_bucket, policy.keep_monthly, "monthly")
 
-    # Output list: newest->oldest for parsed items, then unparsed (sorted)
+    # Output list: oldest->newest for parsed items, then unparsed (original order)
     out: List[DecisionTuple] = []
-    parsed_items_oldest = sorted(parsed_items, key=lambda x: x[2])
+    group_dts_oldest = sorted(groups.keys())
     tag_order = ("monthly", "weekly", "daily")
-    for _idx, k, _dt in parsed_items_oldest:
-        if k in keepers:
-            tags = keepers[k]
+    for dt in group_dts_oldest:
+        keys_with_idx = sorted(groups[dt], key=lambda x: x[0])
+        if dt in keepers:
+            tags = keepers[dt]
             tag = ",".join(t for t in tag_order if t in tags)
-            out.append((k, "keep", tag))
+            decision = "keep"
         else:
-            out.append((k, "remove", ""))
+            tag = ""
+            decision = "remove"
+        for _idx, k in keys_with_idx:
+            out.append((k, decision, tag))
 
-    for k in sorted(unparsed_keys):
-        out.append((k, "keep", "unparsed"))
+    for _idx, k in sorted(unparsed_items, key=lambda x: x[0]):
+        out.append((k, "ignore", "unparsed"))
 
     return out
 
@@ -151,61 +156,102 @@ def apply_removal(
     bucket: str,
     decisions: List[DecisionTuple],
     *,
+    filename_ts_re: re.Pattern[str],
+    timestamp_format: str,
     region: Optional[str] = None,
     min_remaining: int = 5,
     dry_run: bool = True,
 ) -> dict:
     """
-    Applies deletions for entries marked "remove", in the order provided.
+    Applies deletions for entries marked "remove", grouped by timestamp.
 
-    Core logic must supply decisions ordered oldest-first if that is desired.
+    Deletion order is oldest-first by timestamp.
 
     Safety:
-      - Maintains a running count of remaining objects.
-      - Before deleting another object, if remaining <= min_remaining, aborts the loop.
+      - Maintains a running count of remaining backup groups (unique timestamps).
+      - Before deleting another group, if remaining <= min_remaining, aborts the loop.
 
     Returns a dict suitable for logging:
-      { "total": int, "deleted": int, "skipped": bool, "reason": str, "deleted_keys": [...] }
+      {
+        "total": int,
+        "total_groups": int,
+        "deleted": int,
+        "deleted_groups": int,
+        "skipped": bool,
+        "reason": str,
+        "deleted_keys": [...]
+      }
     """
-    total = len(decisions)
-    remaining = total
+    total_objects = len(decisions)
+    groups: Dict[datetime, List[str]] = {}
+    group_decisions: Dict[datetime, str] = {}
 
-    if total <= min_remaining:
+    for key, decision, _tag in decisions:
+        if decision == "ignore":
+            continue
+        dt = parse_timestamp_from_key(key, filename_ts_re, timestamp_format)
+        if dt is None:
+            raise RuntimeError(f"Expected timestamp for key but none found: {key}")
+        if dt not in groups:
+            groups[dt] = []
+            group_decisions[dt] = decision
+        elif group_decisions[dt] != decision:
+            raise RuntimeError(f"Inconsistent decisions for timestamp group {dt.isoformat()}")
+        groups[dt].append(key)
+
+    total_groups = len(groups)
+    remaining_groups = total_groups
+
+    if total_groups <= min_remaining:
         return {
-            "total": total,
+            "total": total_objects,
+            "total_groups": total_groups,
             "deleted": 0,
+            "deleted_groups": 0,
             "skipped": True,
-            "reason": f"Only {total} objects exist (<= {min_remaining}). No deletions performed.",
+            "reason": (
+                f"Only {total_groups} backup groups exist (<= {min_remaining}). "
+                "No deletions performed."
+            ),
             "deleted_keys": [],
         }
 
     # Plan deletions in-order, aborting once we'd hit the safety floor
     keys_to_delete: List[str] = []
-    for key, decision, _tag in decisions:
-        if decision != "remove":
+    deleted_groups = 0
+    for dt in sorted(groups.keys()):
+        if group_decisions[dt] != "remove":
             continue
 
-        # If we delete this one, remaining decreases by 1.
-        next_remaining = remaining - 1
+        # If we delete this group, remaining decreases by 1.
+        next_remaining = remaining_groups - 1
         if next_remaining < min_remaining:
             break
 
-        keys_to_delete.append(key)
-        remaining = next_remaining
+        keys_to_delete.extend(groups[dt])
+        remaining_groups = next_remaining
+        deleted_groups += 1
 
     if not keys_to_delete:
         return {
-            "total": total,
+            "total": total_objects,
+            "total_groups": total_groups,
             "deleted": 0,
+            "deleted_groups": 0,
             "skipped": False,
-            "reason": f"No deletions selected (would hit safety floor of {min_remaining}).",
+            "reason": (
+                f"No deletions selected (would hit safety floor of {min_remaining} backup "
+                "groups)."
+            ),
             "deleted_keys": [],
         }
 
     if dry_run:
         return {
-            "total": total,
+            "total": total_objects,
+            "total_groups": total_groups,
             "deleted": len(keys_to_delete),
+            "deleted_groups": deleted_groups,
             "skipped": False,
             "reason": "Dry run; deletions not executed.",
             "deleted_keys": keys_to_delete,
@@ -217,14 +263,19 @@ def apply_removal(
     # Batch delete (max 1000 keys per call)
     for i in range(0, len(keys_to_delete), 1000):
         chunk = keys_to_delete[i : i + 1000]
-        s3.delete_objects(
+        response = s3.delete_objects(
             Bucket=bucket,
             Delete={"Objects": [{"Key": k} for k in chunk], "Quiet": True},
         )
+        errors = response.get("Errors", [])
+        if errors:
+            raise RuntimeError(f"S3 delete_objects reported errors: {errors}")
 
     return {
-        "total": total,
+        "total": total_objects,
+        "total_groups": total_groups,
         "deleted": len(keys_to_delete),
+        "deleted_groups": deleted_groups,
         "skipped": False,
         "reason": "Deletions executed.",
         "deleted_keys": keys_to_delete,
@@ -237,11 +288,10 @@ def main() -> dict:
     region = os.environ.get("AWS_REGION")
     regex_value = os.environ.get("S3_GFS_REGEX")
     if not regex_value:
-        raise RuntimeError("S3_GFS_REGEX is required and must include a capture group.")
-    try:
-        filename_ts_re = re.compile(regex_value)
-    except re.error as exc:
-        raise RuntimeError("S3_GFS_REGEX is invalid.") from exc
+        raise RuntimeError("S3_GFS_REGEX is required and must contain exactly one capture group.")
+    filename_ts_re = re.compile(regex_value)
+    if filename_ts_re.groups != 1:
+        raise RuntimeError("S3_GFS_REGEX must contain exactly one capture group.")
     timestamp_format = os.environ.get("S3_GFS_TIMESTAMP_FORMAT", "%Y-%m-%dT%H:%M:%SZ")
 
     # Defaults are the policy you described; tweak via env if desired.
@@ -266,6 +316,8 @@ def main() -> dict:
     result = apply_removal(
         bucket=bucket,
         decisions=decisions,
+        filename_ts_re=filename_ts_re,
+        timestamp_format=timestamp_format,
         region=region,
         min_remaining=min_remaining,
         dry_run=dry_run,

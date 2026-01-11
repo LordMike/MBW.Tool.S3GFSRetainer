@@ -5,6 +5,10 @@ import main as s3_gfs_main
 RetentionPolicy = s3_gfs_main.RetentionPolicy
 core_logic = s3_gfs_main.core_logic
 apply_removal = s3_gfs_main.apply_removal
+FILENAME_TS_RE = s3_gfs_main.re.compile(
+    r"Automatic_backup_\d+\.\d+\.\d+_(\d{4}-\d{2}-\d{2}_\d{2}\.\d{2})_"
+)
+TIMESTAMP_FORMAT = "%Y-%m-%d_%H.%M"
 
 
 def test_retention_policy_expected_decisions():
@@ -185,10 +189,8 @@ def test_retention_policy_expected_decisions():
     decisions = core_logic(
         keys,
         policy,
-        filename_ts_re=s3_gfs_main.re.compile(
-            r"Automatic_backup_\d+\.\d+\.\d+_(\d{4}-\d{2}-\d{2}_\d{2}\.\d{2})_"
-        ),
-        timestamp_format="%Y-%m-%d_%H.%M",
+        filename_ts_re=FILENAME_TS_RE,
+        timestamp_format=TIMESTAMP_FORMAT,
     )
 
     expected = [
@@ -373,7 +375,10 @@ def test_retention_policy_expected_decisions():
     removal_result = apply_removal(
         bucket="test-bucket",
         decisions=decisions,
+        filename_ts_re=FILENAME_TS_RE,
+        timestamp_format=TIMESTAMP_FORMAT,
         dry_run=True,
+        min_remaining=0,
     )
 
     assert removal_result["deleted"] == 156
@@ -408,16 +413,17 @@ def test_removal_with_new_backup_only_removes_previous_latest():
     decisions = core_logic(
         keys,
         policy,
-        filename_ts_re=s3_gfs_main.re.compile(
-            r"Automatic_backup_\d+\.\d+\.\d+_(\d{4}-\d{2}-\d{2}_\d{2}\.\d{2})_"
-        ),
-        timestamp_format="%Y-%m-%d_%H.%M",
+        filename_ts_re=FILENAME_TS_RE,
+        timestamp_format=TIMESTAMP_FORMAT,
     )
 
     removal_result = apply_removal(
         bucket="test-bucket",
         decisions=decisions,
+        filename_ts_re=FILENAME_TS_RE,
+        timestamp_format=TIMESTAMP_FORMAT,
         dry_run=True,
+        min_remaining=4,
     )
 
     expected_removed = {
@@ -449,15 +455,15 @@ def test_min_remaining_keeps_five_and_removes_one():
     decisions = core_logic(
         keys,
         policy,
-        filename_ts_re=s3_gfs_main.re.compile(
-            r"Automatic_backup_\d+\.\d+\.\d+_(\d{4}-\d{2}-\d{2}_\d{2}\.\d{2})_"
-        ),
-        timestamp_format="%Y-%m-%d_%H.%M",
+        filename_ts_re=FILENAME_TS_RE,
+        timestamp_format=TIMESTAMP_FORMAT,
     )
 
     removal_result = apply_removal(
         bucket="test-bucket",
         decisions=decisions,
+        filename_ts_re=FILENAME_TS_RE,
+        timestamp_format=TIMESTAMP_FORMAT,
         dry_run=True,
         min_remaining=5,
     )
@@ -488,10 +494,8 @@ def test_decisions_are_ordered_by_datetime():
     decisions = core_logic(
         keys,
         policy,
-        filename_ts_re=s3_gfs_main.re.compile(
-            r"Automatic_backup_\d+\.\d+\.\d+_(\d{4}-\d{2}-\d{2}_\d{2}\.\d{2})_"
-        ),
-        timestamp_format="%Y-%m-%d_%H.%M",
+        filename_ts_re=FILENAME_TS_RE,
+        timestamp_format=TIMESTAMP_FORMAT,
     )
 
     assert [key for key, _decision, _tag in decisions] == [
@@ -499,3 +503,28 @@ def test_decisions_are_ordered_by_datetime():
         "Automatic_backup_2026.01.0_2026-01-02_01.00_00000002.tar",
         "Automatic_backup_2026.01.0_2026-01-03_01.00_00000003.tar",
     ]
+
+
+def test_unparsed_paths_are_ignored():
+    keys = [
+        "Automatic_backup_2026.01.0_2026-01-01_01.00_00000001.tar",
+        "unexpected.txt",
+        "Automatic_backup_2026.01.0_2026-01-02_01.00_00000002.tar",
+    ]
+
+    policy = RetentionPolicy(
+        keep_daily=1,
+        keep_weekly=0,
+        keep_monthly=0,
+    )
+
+    decisions = core_logic(
+        keys,
+        policy,
+        filename_ts_re=FILENAME_TS_RE,
+        timestamp_format=TIMESTAMP_FORMAT,
+    )
+
+    decision_map = {key: decision for key, decision, _tag in decisions}
+
+    assert decision_map["unexpected.txt"] == "ignore"
