@@ -10,9 +10,9 @@ its `.metadata.json`).
 - Every object key is matched against `S3_GFS_REGEX`.
 - Keys that do not match are ignored and never deleted.
 - Matching keys are grouped by their timestamp and retained by:
-  - `keep_daily`: newest N unique days
-  - `keep_weekly`: newest N ISO weeks
-  - `keep_monthly`: newest N months
+  - `S3_GFS_KEEP_DAILY`: newest N unique days
+  - `S3_GFS_KEEP_WEEKLY`: newest N ISO weeks
+  - `S3_GFS_KEEP_MONTHLY`: newest N months
 - Deletions happen oldest-first and stop once `S3_GFS_MIN_REMAINING` groups
   would be violated.
 - Any S3 delete error raises an exception and stops the run.
@@ -62,6 +62,11 @@ For that format, set:
 S3_GFS_REGEX=Automatic_backup_\d+\.\d+\.\d+_(\d{4}-\d{2}-\d{2}_\d{2}\.\d{2})_
 S3_GFS_TIMESTAMP_FORMAT=%Y-%m-%d_%H.%M
 ```
+
+## Dependencies
+
+- Python 3.10+.
+- `boto3`.
 
 ## Run locally
 
