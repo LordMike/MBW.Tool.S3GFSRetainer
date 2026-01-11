@@ -43,13 +43,20 @@ These environment variables control the Lambda behavior.
 
 ## Example regex
 
-Home Assistant backup naming usually looks like:
+Use any naming scheme you prefer, as long as the timestamp can be captured in a
+single regex group and parsed by `strptime`. See Python's format codes:
+[strftime/strptime format codes](https://docs.python.org/3/library/datetime.html#strftime-and-strptime-format-codes)
+
+## Home Assistant example
+
+Home Assistant backup names often look like:
 
 ```
 Automatic_backup_2026.1.0_2026-01-09_04.45_52003641.tar
+Automatic_backup_2026.1.0_2026-01-09_04.45_52003641.metadata.json
 ```
 
-For that format:
+For that format, set:
 
 ```
 S3_GFS_REGEX=Automatic_backup_\d+\.\d+\.\d+_(\d{4}-\d{2}-\d{2}_\d{2}\.\d{2})_
