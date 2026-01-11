@@ -4,11 +4,13 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import boto3
 
 DecisionTuple = Tuple[str, str, str]  # (key, decision, tag) decision=keep/remove/ignore
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,7 @@ def parse_timestamp_from_key(
 
 
 def fetch_from_s3(bucket: str, prefix: str = "", region: Optional[str] = None) -> List[str]:
+    logger.info("Listing objects from s3://%s/%s", bucket, prefix)
     session = boto3.session.Session(region_name=region) if region else boto3.session.Session()
     s3 = session.client("s3")
 
@@ -59,6 +62,7 @@ def fetch_from_s3(bucket: str, prefix: str = "", region: Optional[str] = None) -
         else:
             break
 
+    logger.info("Listed %d object keys", len(out))
     return out
 
 
@@ -89,6 +93,7 @@ def core_logic(
             parsed_items.append((idx, k, dt))
 
     if not parsed_items:
+        logger.info("All %d keys ignored (no timestamp match)", len(unparsed_items))
         return [
             (k, "ignore", "unparsed")
             for _idx, k in sorted(unparsed_items, key=lambda x: x[0])
@@ -97,6 +102,13 @@ def core_logic(
     groups: Dict[datetime, List[Tuple[int, str]]] = {}
     for idx, k, dt in parsed_items:
         groups.setdefault(dt, []).append((idx, k))
+
+    logger.info(
+        "Parsed %d keys into %d timestamp groups (%d unparsed)",
+        len(parsed_items),
+        len(groups),
+        len(unparsed_items),
+    )
 
     # Newest -> oldest for selection
     group_dts_newest = sorted(groups.keys(), reverse=True)
@@ -148,6 +160,16 @@ def core_logic(
 
     for _idx, k in sorted(unparsed_items, key=lambda x: x[0]):
         out.append((k, "ignore", "unparsed"))
+
+    counts = {"keep": 0, "remove": 0, "ignore": 0}
+    for _k, decision, _tag in out:
+        counts[decision] += 1
+    logger.info(
+        "Decisions: keep=%d remove=%d ignore=%d",
+        counts["keep"],
+        counts["remove"],
+        counts["ignore"],
+    )
 
     return out
 
@@ -203,6 +225,11 @@ def apply_removal(
     remaining_groups = total_groups
 
     if total_groups <= min_remaining:
+        logger.info(
+            "Safety floor hit before deletes: total_groups=%d min_remaining=%d",
+            total_groups,
+            min_remaining,
+        )
         return {
             "total": total_objects,
             "total_groups": total_groups,
@@ -226,6 +253,11 @@ def apply_removal(
         # If we delete this group, remaining decreases by 1.
         next_remaining = remaining_groups - 1
         if next_remaining < min_remaining:
+            logger.info(
+                "Stopping deletes at min_remaining=%d (remaining_groups=%d)",
+                min_remaining,
+                remaining_groups,
+            )
             break
 
         keys_to_delete.extend(groups[dt])
@@ -233,6 +265,9 @@ def apply_removal(
         deleted_groups += 1
 
     if not keys_to_delete:
+        logger.info(
+            "No deletions selected after planning (min_remaining=%d)", min_remaining
+        )
         return {
             "total": total_objects,
             "total_groups": total_groups,
@@ -247,6 +282,8 @@ def apply_removal(
         }
 
     if dry_run:
+        for key in keys_to_delete:
+            logger.info("DRY RUN delete s3://%s/%s", bucket, key)
         return {
             "total": total_objects,
             "total_groups": total_groups,
@@ -263,6 +300,8 @@ def apply_removal(
     # Batch delete (max 1000 keys per call)
     for i in range(0, len(keys_to_delete), 1000):
         chunk = keys_to_delete[i : i + 1000]
+        for key in chunk:
+            logger.info("Deleting s3://%s/%s", bucket, key)
         response = s3.delete_objects(
             Bucket=bucket,
             Delete={"Objects": [{"Key": k} for k in chunk], "Quiet": True},
@@ -283,58 +322,88 @@ def apply_removal(
 
 
 def main() -> dict:
-    bucket = os.environ["S3_BUCKET"]
-    prefix = os.environ.get("S3_PREFIX", "")
-    region = os.environ.get("AWS_REGION")
-    regex_value = os.environ.get("S3_GFS_REGEX")
-    if not regex_value:
-        raise RuntimeError("S3_GFS_REGEX is required and must contain exactly one capture group.")
-    filename_ts_re = re.compile(regex_value)
-    if filename_ts_re.groups != 1:
-        raise RuntimeError("S3_GFS_REGEX must contain exactly one capture group.")
-    timestamp_format = os.environ.get("S3_GFS_TIMESTAMP_FORMAT", "%Y-%m-%dT%H:%M:%SZ")
-
-    # Defaults are the policy you described; tweak via env if desired.
-    policy = RetentionPolicy(
-        keep_daily=int(os.environ.get("S3_GFS_KEEP_DAILY", "7")),
-        keep_weekly=int(os.environ.get("S3_GFS_KEEP_WEEKLY", "4")),
-        keep_monthly=int(os.environ.get("S3_GFS_KEEP_MONTHLY", "12")),
+    logging.basicConfig(
+        level=os.environ.get("S3_GFS_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(message)s",
     )
+    logger.info("S3 GFS retention run started")
+    try:
+        bucket = os.environ["S3_BUCKET"]
+        prefix = os.environ.get("S3_PREFIX", "")
+        region = os.environ.get("AWS_REGION")
+        regex_value = os.environ.get("S3_GFS_REGEX")
+        if not regex_value:
+            raise RuntimeError(
+                "S3_GFS_REGEX is required and must contain exactly one capture group."
+            )
+        filename_ts_re = re.compile(regex_value)
+        if filename_ts_re.groups != 1:
+            raise RuntimeError("S3_GFS_REGEX must contain exactly one capture group.")
+        timestamp_format = os.environ.get(
+            "S3_GFS_TIMESTAMP_FORMAT", "%Y-%m-%dT%H:%M:%SZ"
+        )
 
-    dry_run = os.environ.get("S3_GFS_DRY_RUN", "true").lower() in ("1", "true", "yes", "y")
-    min_remaining = int(os.environ.get("S3_GFS_MIN_REMAINING", "5"))
+        # Defaults are the policy you described; tweak via env if desired.
+        policy = RetentionPolicy(
+            keep_daily=int(os.environ.get("S3_GFS_KEEP_DAILY", "7")),
+            keep_weekly=int(os.environ.get("S3_GFS_KEEP_WEEKLY", "4")),
+            keep_monthly=int(os.environ.get("S3_GFS_KEEP_MONTHLY", "12")),
+        )
 
-    keys = fetch_from_s3(bucket=bucket, prefix=prefix, region=region)
-    decisions = core_logic(
-        keys,
-        policy,
-        filename_ts_re=filename_ts_re,
-        timestamp_format=timestamp_format,
-    )
+        dry_run = os.environ.get("S3_GFS_DRY_RUN", "true").lower() in (
+            "1",
+            "true",
+            "yes",
+            "y",
+        )
+        min_remaining = int(os.environ.get("S3_GFS_MIN_REMAINING", "5"))
 
-    # Apply deletions
-    result = apply_removal(
-        bucket=bucket,
-        decisions=decisions,
-        filename_ts_re=filename_ts_re,
-        timestamp_format=timestamp_format,
-        region=region,
-        min_remaining=min_remaining,
-        dry_run=dry_run,
-    )
+        logger.info(
+            "Config bucket=%s prefix=%s dry_run=%s min_remaining=%d keep_daily=%d keep_weekly=%d keep_monthly=%d",
+            bucket,
+            prefix,
+            dry_run,
+            min_remaining,
+            policy.keep_daily,
+            policy.keep_weekly,
+            policy.keep_monthly,
+        )
 
-    # If you run in Lambda, printing is captured by CloudWatch
-    print(
-        {
-            "bucket": bucket,
-            "prefix": prefix,
-            "dry_run": dry_run,
-            "policy": policy.__dict__,
-            "result": result,
-        }
-    )
+        keys = fetch_from_s3(bucket=bucket, prefix=prefix, region=region)
+        decisions = core_logic(
+            keys,
+            policy,
+            filename_ts_re=filename_ts_re,
+            timestamp_format=timestamp_format,
+        )
 
-    return result
+        # Apply deletions
+        result = apply_removal(
+            bucket=bucket,
+            decisions=decisions,
+            filename_ts_re=filename_ts_re,
+            timestamp_format=timestamp_format,
+            region=region,
+            min_remaining=min_remaining,
+            dry_run=dry_run,
+        )
+
+        # If you run in Lambda, printing is captured by CloudWatch
+        print(
+            {
+                "bucket": bucket,
+                "prefix": prefix,
+                "dry_run": dry_run,
+                "policy": policy.__dict__,
+                "result": result,
+            }
+        )
+
+        logger.info("S3 GFS retention run completed")
+        return result
+    except Exception:
+        logger.exception("S3 GFS retention run failed")
+        raise
 
 
 # Lambda handler compatibility
