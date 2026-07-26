@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LordMike/MBW.Tools.GhStandardContent/master/spec/StandardContent.json",
+  "meta": {
+    "repo": "LordMike/MBW.Tool.S3GFSRetainer",
+    "profiles": [
+      "standardCI",
+      "standardContent",
+      "standardNoDeploy"
+    ],
+    "files": [
+      ".gitattributes",
+      ".github/actions/collect_publishables/action.yml",
+      ".github/actions/initialize_ci/action.yml",
+      ".github/actions/publish_docker/action.yml",
+      ".github/actions/publish_github_release/action.yml",
+      ".github/actions/publish_nuget/action.yml",
+      ".github/readme.md",
+      ".github/workflows/ci.yml",
+      ".github/workflows/deploy.yml",
+      ".gitignore"
+    ],
+    "last_updated": "2026-07-26T10:34:37.2382671\u002B00:00"
+  }
+}
